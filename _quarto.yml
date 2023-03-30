@@ -1,0 +1,6 @@
+project:
+  title: "GLM_beta"
+execute:
+  freeze: auto
+editor: visual
+

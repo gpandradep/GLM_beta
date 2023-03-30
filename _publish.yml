@@ -1,0 +1,4 @@
+- source: GLM_beta.qmd
+  quarto-pub:
+    - id: f84430c8-2e16-43a8-9470-6aae0f6780dd
+      url: 'https://quartopub.com/sites/gpandradep/glmm-familia-beta--introduccion'

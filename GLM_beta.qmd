@@ -1,0 +1,528 @@
+---
+title: "Modelo lineal Generalizado mixto familia beta"
+subtitle: "Introducción con datos de actividade mamíferos"
+author: 
+ - name: "Gabriel Andrade Ponce"
+   url: https://gpandradep.github.io/gpandradep/ 
+   affiliation: Posgrado, Instituto de Ecología A.C.
+
+toc: true
+toc-depth: 2
+toc-location: left
+theme: minty
+embed-resources: true
+smooth-scroll: true
+title-block-banner: true
+code-line-numbers: true
+code-link: true
+lang: es
+bibliography: references.bib
+---
+
+# Contexto
+
+![](img/interactions.png){fig-align="center" width="290"}
+
+En mamíferos carnívoros las interacciones generalmente son estudiadas por medio de patrones de co-ocurrencia y cámaras trampa.
+
+Si la co-ocurrencia es un buen proxy de interacciones, los patrones deberían responder de igual manera a los procesos que afectan teóricamente la interacción
+
+![](img/co-oc.png){fig-align="center" width="380"}
+
+# Paquetes
+
+```{r}
+#| message: false
+#| warning: false
+library(tidyverse) # Easily Install and Load the 'Tidyverse'
+library(GGally) # Extension to 'ggplot2'
+library(broom) # Convert Statistical Objects into Tidy Tibbles
+library(broom.mixed) # Tidying Methods for Mixed Models
+library(performance) # Assessment of Regression Models Performance
+library(insight) # Easy Access to Model Information for Various Model Objects
+library(MuMIn) # Multi-Model Inference
+library(modelbased) # Estimation of Model-Based Predictions, Contrasts and Means
+library(ggeffects) 
+library(betareg) # Beta Regression
+library(glmmTMB) # Generalized Linear Mixed Models using Template Model Builder
+library(patchwork) # The Composer of Plots
+library(DHARMa) # Residual Diagnostics for Hierarchical (Multi-Level / Mixed) Regression Models
+library(kableExtra) # Construct Complex Table with 'kable' and Pipe Syntax
+
+
+library(showtext) # Using Fonts More Easily in R Graphs
+showtext_opts(dpi = 300)
+
+font_add(family = "Gill Sans MT", regular = "GIL_____.TTF", italic = "GILI____.TTF")
+showtext_auto()
+
+```
+
+# Datos
+
+En este caso voy a usar los datos de co-ocurrencia temporal de competencia de mamíferos carnívoros. Los datos provienen de una revisión sistemática de literatura que hice en mi doctorado.
+
+```{r}
+#| message: false
+#| warning: false
+tempC_db <- read_csv("data/tempC_db.csv")[,-1] %>%
+  select(Ov_coeff, D_competitor, D_family, S_competitor, S_family, mass_ratio, diet_dist, Lat_abs, p_distance, Samp_dur, Locality, Label
+         ) %>%  # Selecciono variables
+  drop_na() # Hay unas variables sin información por lo que las elimino
+
+dim(tempC_db)
+  
+DT::datatable(tempC_db )
+```
+
+## Variable de respuesta
+
+La variable de respuesta es el coeficiente de superposición temporal [@ridout2009]. Este coeficiente toma valores de 0 cuando las especies no superponen su actividad y 1 cuando tienen superposición total.
+
+![](img/cativity.png){fig-align="center" width="412"}
+
+## Gráficos de las variables
+
+Aquí algunos gráficos para poder visualizar los datos
+
+```{r}
+#| code-fold: true
+
+# Ov_coef vs categoric variables
+
+cloud_Ov_plot <- function(data, var, var_string){
+  plot <- ggplot(data, aes(x= {{var}}, y= Ov_coeff, fill= {{var}}))+
+    ggdist::stat_halfeye(
+      adjust = .5, 
+      width = .6, 
+      .width = 0, 
+      justification = -.3, 
+      point_colour = NA)+
+    geom_boxplot(
+      width = .25, 
+      outlier.shape = NA  )+
+    geom_point(aes(color= {{var}}),
+               size = 3,
+               alpha = .5,
+               shape= 16,
+               fill= "black",
+               position = position_jitter(
+                 seed = 1, width = .1)) + 
+    coord_cartesian(xlim = c(1.2, NA), clip = "off")+
+    labs(y= "Overlap coefficient",
+         x= var_string) +
+    scale_fill_viridis_d(option = "mako", begin = 0.1,
+                       end = 0.8)+
+    scale_colour_viridis_d(option = "mako", begin = 0.1,
+                       end = 0.8)+
+    theme_bw()+
+    theme(text=element_text(family = "Gill Sans MT",size = 10),
+          legend.position = "none",
+          plot.margin= margin(t=0.5,r=0.5, b=1, l=1,
+                              unit = "cm"))
+  return(plot)
+  
+}
+
+# Dotplot function
+dotplot_fun <- function(data, dimension){
+d_plot <-  data %>% 
+   mutate(index = seq(n())) %>%
+  select_if(is.numeric) %>% 
+  pivot_longer(cols = !index, 
+               names_to = "Variable", 
+               values_to = "Value") %>%
+  ggplot(aes(x= Value, y= index, col= Variable))+
+  geom_point(size= 2, alpha=0.6)+
+  scale_color_viridis_d(option = "mako", 
+                        begin = 0.1,
+                        end = 0.8)+
+  facet_wrap(~Variable, scales = "free")+
+  labs(title = paste(dimension, "Dotplot" ),
+        y= "Order of ovservation")+
+   theme_bw()+
+   theme(legend.position = "none",
+         text = element_text(size=10, family = "Gill Sans MT"))
+  
+}
+
+
+```
+
+```{r}
+(TC_dd <- cloud_Ov_plot(tempC_db, diet_dist, "Diferencia de dieta"))
+```
+
+```{r}
+(Temp_clev <- tempC_db %>% 
+    select_if(., is.numeric) %>% 
+    dotplot_fun(., "Temporal"))
+```
+
+## Correlación de variables numéricas
+
+Es importante evaluar si existe correlación fuerte entre las variables explicativas. Si hay dos variables correlacionadas fuertemente en un mismo modelo será imposible distinguir el efecto. Además, los errores pueden inflarse lo que puede generar que variables importantes pasen como no "significativas" [@dormann2013]. En esta caso aplicaré una prueba de correlación de spearman.
+
+```{r}
+#| message: false
+#| warning: false
+Spat_cor <- tempC_db %>%
+    select_if(is.numeric) %>% 
+  ggpairs(.,
+        upper = list(continuous= wrap("cor", method= "spearman", 
+                                      digits=2, corSize= 80)),
+        lower = list( continuous= "smooth")) +
+  theme_bw()+
+  theme(text = element_text(size=8, family="Gill Sans MT"))
+Spat_cor
+```
+
+Parece no existir una correlación preocupante
+
+### Scalar las variables
+
+```{r}
+scale_vec <- function(data){scale(data) %>% as.vector() }
+
+tempC_data <- tempC_db %>% 
+  mutate(across(c(6,8,9,10), scale_vec) )
+
+```
+
+# El modelo
+
+Debido a que la variable de respuesta es una proporción que solo puede tomar valores que van de 0 a 1, usaremos un modelo lineal generalizado con familia de error Beta [@ferrari2004]. En general no se recomienda modelar proporciones con modelo lineal general, ni realizar transformaciones de arcsin o logit [@douma2019].
+
+La parametrización más común del glm beta es la de media-precisión, en donde $\mu$ es la media esperada y $\phi$ la precisión ( inverso de la dispersión) y se relacionan así:
+
+$$
+\frac{\mu(1- \mu)}{1+ \phi}
+$$
+
+Los valores de estos dos parámetros hacen que pueda tomar muchas formas la curva de distribución, desde similar a gausiana hasta binomial. Lo que hace la beta muy flexible.
+
+De forma algebraica la beta entenderse así:
+
+$$
+y \sim Beta (\mu, \phi)
+$$
+
+$$
+logit(\mu) = log (\frac{\mu}{1-\mu})
+$$
+
+Otra ventaja de la Beta es que el parámetro $\phi$ puede ser estimado para todas las observaciones o modelado en función de variables usando un enlace log.
+
+## Estructura de efectos aleatorios
+
+Mis datos provienen de artículos y hay localidades dentro de esto artículos. Puede que las estimaciones de co-ocurrencia sean similares entre artículos y localidades (o no) por lo que conviene checarlo. Siguiendo el protocolo de [@zuur2009], podemos comparar modelos con efectos aleatorios de otro que no.
+
+Para ello vamos a usar el paquete glmmTMB [@glmmTMB].
+
+```{r}
+#Modelo sin efectos elatorios
+Temp_r0 <- glmmTMB(formula = Ov_coeff ~ (mass_ratio+ I(mass_ratio^2)+p_distance + diet_dist+Lat_abs+Samp_dur)^2, 
+                   data=tempC_data, 
+                   family=beta_family(), REML = T)
+
+# Label aleatorio
+Temp_r1 <- glmmTMB(formula = Ov_coeff ~ (mass_ratio+ I(mass_ratio^2)+p_distance + diet_dist+Lat_abs+Samp_dur)^2+ (1|Label), 
+                   data=tempC_data, 
+                   family=beta_family(), REML = T)
+
+# Label de cada locality
+Temp_r2 <- glmmTMB(formula = Ov_coeff ~ (mass_ratio+ I(mass_ratio^2)+p_distance + diet_dist+Lat_abs+Samp_dur)^2+ (1|Label/Locality),
+                   data=tempC_data, 
+                   family=beta_family(), REML = T)
+
+
+```
+
+### Comparando por AIC
+
+```{r}
+temp_AICtab <- AICcmodavg::aictab(cand.set = list(Temp_r0, Temp_r1, Temp_r2), 
+                                  sort = T,
+                                  modnames = c("no random",
+                                               "Label random",
+                                               
+                                               "Label/Locality random"),
+                                    second.ord = F)
+
+kableExtra::kable(temp_AICtab, digits = 2)
+```
+
+El modelo con efectos aleatorios del label es el mejor
+
+```{r}
+summary(Temp_r1)
+
+```
+
+```{r}
+glmmTMB:::Anova.glmmTMB(Temp_r1)
+```
+
+```{r}
+#| fig-height: 10
+random_part <- estimate_grouplevel(Temp_r1) %>% 
+  plot()+ theme_bw()
+  
+random_part
+```
+
+## Supuestos del modelo
+
+Este no es un modelo de conteos, pero existen métodos para saber si la variación que se obtiene es mayor o menor a la esperada por el modelo. El paquete DHARMa [@DHARMa] ofrece una opción para modelos mixtos. DHARMa usa una aproximación con residuales simulados a partir de un proceso parecido a un bootstrap y una función de densidad empírica. Si es algo complejo pero esta mejor explicado en la página del paquete ([🔗 aquí)](https://cran.r-project.org/web/packages/DHARMa/vignettes/DHARMa.html)
+
+```{r}
+#| fig-width: 14
+testDispersion(Temp_r1)
+```
+
+En palabras mortales, en este test vamos a observar si la variación observada (linea roja), difiere de la que puede llegar a tener el modelo ajustado muchas veces (histograma barritas grises). Si la linea cae dentro del histograma, sugiere que el modelo no tiene sub/sobre dispersión. En nuestro caso, el modelo parece no tener problemas graves de sobre dispersión.
+
+Aun así, vamos a provechar las ventajas de Dharma para explorar si el modelo sigue teniendo algunos problemas
+
+```{r}
+#| fig-width: 14
+global_res <- simulateResiduals(Temp_r1)
+plot(global_res)
+```
+
+Cómo se observa el modelo presenta problemas de homogeneidad de varianza. Esto puede ser causada por la mala especificación o por una o más variables. DHARMa nos puede ayudar a explorar esto
+
+```{r}
+#| fig-width: 14
+
+# Para variables categóricas
+testCategorical(global_res, tempC_db$diet_dist) 
+#Variables continuas
+testQuantiles(global_res, tempC_db$mass_ratio)
+testQuantiles(global_res, tempC_db$Lat_abs)
+testQuantiles(global_res, tempC_db$p_distance)
+testQuantiles(global_res, tempC_db$Samp_dur)
+```
+
+Hay tres variables que pueden estar generando estos problemas. Quizás sea que la relación sea cuadrática
+
+```{r}
+Temp <- glmmTMB(formula = Ov_coeff ~ (mass_ratio+ I(mass_ratio^2)+p_distance+ I(p_distance^2) + diet_dist+Lat_abs+I(Lat_abs^2)+I(Samp_dur^2)+Samp_dur)^2+ (1|Label), 
+                   data=tempC_data, 
+                   family=beta_family(), REML = T)
+```
+
+```{r}
+#| fig-width: 14
+temp_res <- simulateResiduals(Temp)
+plot(temp_res)
+```
+
+Recuerden que podemos modelar $\phi$ para capturar la variación:
+
+```{r}
+Temp2 <- glmmTMB(formula = Ov_coeff ~ (mass_ratio+ I(mass_ratio^2)+p_distance+  diet_dist+Lat_abs+Samp_dur)^2+ (1|Label),
+                dispformula = ~p_distance+ Samp_dur+Lat_abs,
+                   data=tempC_data, 
+                   family=beta_family(), REML = T)
+```
+
+```{r}
+#| fig-width: 14
+temp_res2 <- simulateResiduals(Temp2)
+plot(temp_res2)
+```
+
+Parece que la formula con dispersión es a lo mejor que puedo llegar
+
+## Estructura de efectos fijos
+
+Ahora vamos a buscar la estructura del mínimo modelo adecuado. En modelos mixtos, cuando usamos AIC para escoger la estructura de las variables fijas, necesitamos que el modelo se ajuste por MLE.
+
+```{r}
+#| message: false
+#| warning: false
+fix_temp <- glmmTMB(formula = Ov_coeff ~ (mass_ratio+ I(mass_ratio^2)+p_distance+  diet_dist+Lat_abs+Samp_dur)^2+ (1|Label),
+                dispformula = ~p_distance+ Samp_dur+Lat_abs,
+                   data=tempC_data, 
+                   family=beta_family(), 
+                REML = F, 
+                na.action = "na.fail")
+
+T_sel<- dredge(fix_temp, 
+               rank = "AIC",
+               fixed = c("disp(p_distance)","disp(Lat_abs)","disp(Samp_dur)"),
+               m.lim= c(NA,6))
+
+T_sel %>% 
+  mutate(across(is.numeric, round, 2)) %>% 
+  DT::datatable()
+```
+
+Según el criterio de $\Delta$ AIC \<2, tenemos tres posibles modelos igualmente plausibles
+
+```{r}
+
+
+mod1 <- glmmTMB(formula = Ov_coeff ~ Lat_abs + mass_ratio + p_distance +
+                      (1 | Label),
+                dispformula = ~p_distance+ Samp_dur+Lat_abs,
+                   data=tempC_data, 
+                   family=beta_family(), 
+                REML = T, 
+                na.action = "na.fail")
+
+mod2 <- glmmTMB(formula = Ov_coeff ~ Lat_abs +mass_ratio+ I(mass_ratio^2) +
+                  p_distance+
+                      (1 | Label),
+                dispformula = ~p_distance+ Samp_dur+Lat_abs,
+                   data=tempC_data, 
+                   family=beta_family(), 
+                REML = T, 
+                na.action = "na.fail")
+
+mod3 <- glmmTMB(formula = Ov_coeff ~  mass_ratio+I(mass_ratio^2) + p_distance + (mass_ratio+I(mass_ratio^2)):p_distance+
+                 (1 | Label),
+                dispformula = ~p_distance+ Samp_dur+Lat_abs,
+                   data=tempC_data, 
+                   family=beta_family(), 
+                REML = T, 
+                na.action = "na.fail")
+
+best_mods <- list(mod1, mod2, mod3) %>% 
+  map(tidy , conf.int = T) %>% 
+  reduce(rbind)
+
+kbl(best_mods, caption = "Models", digits = 3) %>% 
+kable_styling(bootstrap_options = c("striped", "hover"), full_width = F) %>%
+  pack_rows("Ov_coeff ~ Lat_abs +mass_ratio+ I(mass_ratio^2) +
+                  p_distance",1,5) %>%
+  pack_rows("Lat_abs +mass_ratio+ I(mass_ratio^2) +
+                  p_distance",6,11) %>%
+  pack_rows("Ov_coeff ~  mass_ratio+I(mass_ratio^2) + p_distance + (mass_ratio+I(mass_ratio^2)):p_distance",12,18)
+
+```
+
+
+Veamos si las estimaciones de los coeficientes son muy diferentes
+```{r}
+CI_TC <- list(mod1, mod2, mod3) %>% 
+  map(tidy, conf.int= T) %>% 
+  reduce(rbind) %>% 
+  filter(term!= "sd__(Intercept)" & term != "(phi)") %>% 
+  mutate(model= c(rep("mod1", 4), rep("mod2", 5), rep("mod3", 6)))
+
+
+ggplot(CI_TC, aes(x= estimate, y= term,
+                  xmin= conf.low, xmax= conf.high))+
+  geom_pointrange( aes(col= model), position = position_dodge2(width = 0.4))+
+  geom_vline(xintercept = 0, linetype = "dashed")+
+  theme_bw()
+```
+
+## Modo prueba de hipótesis
+
+```{r}
+glmmTMB:::Anova.glmmTMB(fix_temp)
+```
+
+```{r}
+
+p_mod <- glmmTMB(formula = Ov_coeff ~  p_distance+ Lat_abs+ I(mass_ratio^2):p_distance+
+                 (1 | Label),
+                dispformula = ~p_distance+ Samp_dur+Lat_abs,
+                   data=tempC_data, 
+                   family=beta_family(), 
+                REML = T, 
+                na.action = "na.fail")
+
+
+p_mod %>% 
+  tidy(  conf.int = T) %>% 
+  kbl( caption = "Models", digits = 3)
+
+
+```
+
+## Con que modelo quedarme?
+
+Pues creo que la opción que tengo es evaluar en cual modelo los residuales se comportan mejor, así que usaremos de nuevo DHARMa
+
+### Residuales modelo 1
+
+```{r}
+#| fig-width: 14
+res_mod1<- simulateResiduals(mod1)
+plot(res_mod1)
+```
+
+### Residuales modelo 2
+
+```{r}
+#| fig-width: 14
+res_mod2<- simulateResiduals(mod2)
+plot(res_mod2)
+```
+
+### Residuales modelo 3
+
+```{r}
+#| fig-width: 14
+res_mod3<- simulateResiduals(mod3)
+plot(res_mod3)
+```
+
+### Residuales modelo anova
+
+```{r}
+#| fig-width: 14
+res_pmod<- simulateResiduals(p_mod)
+plot(res_pmod)
+```
+
+Yo me quedo con el modelo tres
+
+## Gráficos de predicción
+
+```{r}
+
+p_distvec <- c(max(tempC_data$p_distance), mean(tempC_data$p_distance),
+               min(tempC_data$p_distance))
+
+TC_pred <- ggeffect(mod3, terms =c("mass_ratio[all]", "p_distance[p_distvec]") ) %>% 
+  mutate( mas_real= (x* attr(scale(tempC_db$mass_ratio), "scaled:scale"))+ attr(scale(tempC_db$mass_ratio), "scaled:center"),
+        p_disreal= (as.numeric(as.character(group))* attr(scale(tempC_db$p_distance), "scaled:scale"))+ attr(scale(tempC_db$p_distance), "scaled:center")) %>% 
+  mutate(across(p_disreal, round, 2))
+
+
+DT::datatable(TC_pred)
+```
+
+Ahora el gráfico
+
+```{r}
+
+
+(pred_plot <-  ggplot(TC_pred)+
+    geom_point(data=tempC_db, aes(x= mass_ratio, 
+                                      y= Ov_coeff),
+             size= 1.5, alpha= 0.4, col= "gray")+
+  geom_ribbon(aes(x= mas_real, y= predicted,
+                  ymin= conf.low, ymax= conf.high,
+                  fill= as.factor(p_disreal), 
+                  group= as.factor(p_disreal)), 
+                  alpha=0.4)+
+  geom_line(aes(x= mas_real, y=predicted,
+                group= as.factor(p_disreal)),
+            linewidth= 0.8 )+
+  labs(x= "Log (Mass ratio)",
+        y= "Temporal Overlap",
+       group= "Phylogenetic distance",
+       fill= "Phylogenetic distance",
+       tag= "A")+
+  ylim(c(0,1))+
+  theme_bw()+
+   theme(text = element_text(size=13, family = "Gill Sans MT"),
+         legend.position = c(0.5, 0.10),
+         legend.direction="horizontal"))
+```
